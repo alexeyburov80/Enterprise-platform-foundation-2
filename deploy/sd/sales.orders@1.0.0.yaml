@@ -1,0 +1,122 @@
+# ============================================================================
+# Эталонный SD-документ sales.orders@1.0.0 — в точности листинг 1 спецификации
+# Data Platform v1 (этап A). Два entity: Order + OrderLine (one-to-many внутри
+# store'а), канонические типы, default, enum, check, уникальность, индекс,
+# fileRef. customerRef объявлен uuid (не ref): контрагент в другом store'е,
+# FK между store'ами запрещены инвариантом платформы.
+# ============================================================================
+
+apiVersion: sd.platform/v1
+kind: LogicalStore
+
+metadata:
+  module: sales
+  store: orders
+  version: 1.0.0
+  displayName: "Заказы покупателей"
+  origin: canonical
+
+spec:
+  owner: sales
+  tenancy:
+    mode: single
+  entities:
+    - name: Order
+      table: orders
+      primaryKey: [id]
+      lifecycle:
+        audited: true
+        softDelete: false
+      fields:
+        - name: id
+          type: uuid
+          required: true
+          default: gen_random_uuid()
+        - name: number
+          type: string
+          length: 32
+          required: true
+          description: "Формат ЗК-ГГГГ-NNNNNN"
+        - name: orderDate
+          type: date
+          required: true
+        - name: status
+          type: enum
+          values: [draft, submitted, approved, cancelled]
+          required: true
+        - name: customerRef
+          type: uuid
+          required: true
+          description: "Идентификатор контрагента MDM; без FK — другой store"
+        - name: customerName
+          type: string
+          length: 120
+          required: true
+        - name: currencyCode
+          type: string
+          length: 3
+          required: true
+        - name: totalAmount
+          type: decimal
+          precision: 18
+          scale: 2
+          required: true
+          default: "0"
+        - name: note
+          type: text
+          required: false
+        - name: primaryFile
+          type: fileRef
+          required: false
+      constraints:
+        - type: unique
+          name: uq_order_number
+          fields: [number]
+        - type: check
+          name: ck_order_total_nonneg
+          expr: "totalAmount >= 0"
+      indexes:
+        - name: ix_order_status_date
+          fields: [status ASC, orderDate DESC]
+          method: btree
+      relations:
+        - name: lines
+          entity: OrderLine
+          kind: one-to-many
+          localKey: id
+          foreignKey: orderId
+
+    - name: OrderLine
+      table: order_lines
+      primaryKey: [id]
+      lifecycle:
+        audited: true
+        softDelete: false
+      fields:
+        - name: id
+          type: uuid
+          required: true
+          default: gen_random_uuid()
+        - name: orderId
+          type: ref
+          refEntity: Order
+          required: true
+        - name: sku
+          type: string
+          length: 64
+          required: true
+        - name: qty
+          type: decimal
+          precision: 12
+          scale: 3
+          required: true
+        - name: price
+          type: money
+          required: true
+      constraints:
+        - type: fk
+          name: fk_line_order
+          fields: [orderId]
+          refEntity: Order
+          refFields: [id]
+          onDelete: restrict

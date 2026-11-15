@@ -1,0 +1,69 @@
+# ============================================================================
+# crm.deals@1.0.0 — сделки CRM (цель синхронизации из Битрикс24).
+# Ext-namespace "bitrix" пишется коннектором Б24.
+# ============================================================================
+
+apiVersion: sd.platform/v1
+kind: LogicalStore
+
+metadata:
+  module: crm
+  store: deals
+  version: 1.0.0
+  displayName: "Сделки CRM"
+  origin: canonical
+
+spec:
+  owner: crm
+  tenancy:
+    mode: single
+  entities:
+    - name: Deal
+      table: deals
+      primaryKey: [id]
+      lifecycle:
+        audited: true
+        softDelete: false
+      fields:
+        - name: id
+          type: uuid
+          required: true
+          default: gen_random_uuid()
+        - name: externalId
+          type: string
+          length: 32
+          required: true
+        - name: title
+          type: string
+          length: 200
+          required: true
+        - name: stage
+          type: enum
+          values: [new, qualified, proposal, negotiation, won, lost]
+          required: true
+        - name: amount
+          type: money
+          required: true
+          default: "0"
+        - name: currencyCode
+          type: string
+          length: 3
+          required: false
+        - name: contactName
+          type: string
+          length: 120
+          required: false
+        - name: createdOn
+          type: timestamp
+          required: false
+        - name: comment
+          type: text
+          required: false
+      constraints:
+        - type: unique
+          name: uq_deal_external_id
+          fields: [externalId]
+      indexes:
+        - name: ix_deal_stage
+          fields: [stage]
+          method: btree

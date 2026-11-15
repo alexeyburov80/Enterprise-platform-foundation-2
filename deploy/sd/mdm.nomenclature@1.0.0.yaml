@@ -1,0 +1,69 @@
+# ============================================================================
+# mdm.nomenclature@1.0.0 — master data (цель синхронизации из 1С).
+# Ext-namespace "onec" пишется коннектором 1С, "wms" — расширение WMS
+# (см. mdm.nomenclature.ext.wms@1.0.0.yaml).
+# ============================================================================
+
+apiVersion: sd.platform/v1
+kind: LogicalStore
+
+metadata:
+  module: mdm
+  store: nomenclature
+  version: 1.0.0
+  displayName: "Номенклатура (MDM)"
+  origin: canonical
+
+spec:
+  owner: mdm
+  tenancy:
+    mode: single
+  entities:
+    - name: Nomenclature
+      table: nomenclature
+      primaryKey: [id]
+      lifecycle:
+        audited: true
+        softDelete: false
+      fields:
+        - name: id
+          type: uuid
+          required: true
+          default: gen_random_uuid()
+        - name: code
+          type: string
+          length: 32
+          required: true
+        - name: name
+          type: string
+          length: 120
+          required: true
+        - name: article
+          type: string
+          length: 64
+          required: false
+        - name: unit
+          type: string
+          length: 16
+          required: false
+        - name: price
+          type: money
+          required: true
+          default: "0"
+        - name: weightKg
+          type: decimal
+          precision: 12
+          scale: 3
+          required: false
+        - name: active
+          type: boolean
+          required: true
+          default: "true"
+      constraints:
+        - type: unique
+          name: uq_nom_code
+          fields: [code]
+      indexes:
+        - name: ix_nom_name
+          fields: [name]
+          method: btree

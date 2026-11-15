@@ -1,0 +1,170 @@
+### ============================================================================
+### Data Platform MVP — сценарий демонстрации (VS Code REST Client / JetBrains HTTP Client)
+### Перед запуском: docker compose up -d --build (см. README)
+### Каждый компонент в своём контейнере: dp-api :8080, dp-sync :8090,
+### имитаторы :8081/:8082, «реальные» системы (docker-compose.real.yml) :8083/:8084
+### ============================================================================
+
+@dp   = http://localhost:8080
+@sync = http://localhost:8090
+@1c   = http://localhost:8081
+@b24  = http://localhost:8082
+@r1c  = http://localhost:8083
+@key  = dev-key
+
+### 0. Здоровье стенда (dp-api агрегирует состояние dp-sync и rabbit)
+GET {{dp}}/admin/health
+X-Api-Key: {{key}}
+
+### 0a. Здоровье dp-sync напрямую (внутреннее API воркера)
+GET {{sync}}/health
+
+### 1. Реестр store'ов (SD DSL v1)
+GET {{dp}}/dp/v1/stores
+X-Api-Key: {{key}}
+
+### 2. GetSchema — канон store'а sales.orders
+GET {{dp}}/dp/v1/stores/sales.orders/schema
+X-Api-Key: {{key}}
+
+### 3. Текущие режимы адаптеров (auto; probe реальных систем; история fallback)
+GET {{dp}}/admin/adapters
+X-Api-Key: {{key}}
+
+### ---------------------------------------------------------------------------
+### ШАГ 1. Sync 1С в режиме AUTO: real недоступна → FALLBACK на наш имитатор
+### (в ответе: mode=auto, modeSource=auto→fallback, endpoint=imitator-1c:8080)
+POST {{dp}}/admin/sync/1c
+X-Api-Key: {{key}}
+
+### 4. Что попало в Data Platform (ext.onec.source=stub — из заместителя)
+POST {{dp}}/dp/v1/stores/sales.orders/entities/Order/query
+X-Api-Key: {{key}}
+Content-Type: application/json
+
+{
+  "from": "Order",
+  "select": ["id", "number", "customerName", "totalAmount", "ext"],
+  "where": { "eq": { "field": "status", "value": "submitted" } },
+  "orderBy": [{ "field": "orderDate", "dir": "desc" }],
+  "limit": 10
+}
+
+### ---------------------------------------------------------------------------
+### ШАГ 2. ПЕРЕКЛЮЧЕНИЕ адаптера 1С: auto → real (горячее, без рестарта).
+### Внимание: без поднятого real-1c это вернёт DP-4001 (явный real без подмены).
+### Поднять реальный контур: docker compose -f docker-compose.yml -f docker-compose.real.yml up -d
+POST {{dp}}/admin/adapters/1c/mode
+X-Api-Key: {{key}}
+Content-Type: application/json
+
+{ "mode": "real" }
+
+### 5. Синхронизация из «реальной» 1С (HTTP, OData-подобный API)
+POST {{dp}}/admin/sync/1c
+X-Api-Key: {{key}}
+
+### 6. Проверка: те же ключи (uuid5), ext.onec.source = real
+POST {{dp}}/dp/v1/stores/sales.orders/entities/Order/query
+X-Api-Key: {{key}}
+Content-Type: application/json
+
+{
+  "from": "Order",
+  "select": ["id", "number", "ext"],
+  "where": { "eq": { "field": "number", "value": "ЗК-2026-000101" } }
+}
+
+### ---------------------------------------------------------------------------
+### ШАГ 3. «Реальная» 1С: сдвиг ревизии цен (×1.07)
+POST {{r1c}}/admin/rotate
+Authorization: Basic c3ZjX2RwOmRwLXNlY3JldA==
+
+### 7. Повторная синхронизация — дельта цен приходит в Data Platform
+POST {{dp}}/admin/sync/1c
+X-Api-Key: {{key}}
+
+### 8. Цена поменялась
+POST {{dp}}/dp/v1/stores/mdm.nomenclature/entities/Nomenclature/query
+X-Api-Key: {{key}}
+Content-Type: application/json
+
+{
+  "from": "Nomenclature",
+  "select": ["code", "name", "price", "ext"],
+  "where": { "eq": { "field": "code", "value": "ФНК-001" } }
+}
+
+### ---------------------------------------------------------------------------
+### ШАГ 4. Сценарий «реальная система пропала»: остановите real-1c
+###   docker stop dp-real-1c
+### и верните режим auto — sync transparentно уйдёт в fallback на имитатор
+POST {{dp}}/admin/adapters/1c/mode
+X-Api-Key: {{key}}
+Content-Type: application/json
+
+{ "mode": "auto" }
+
+### 9. Sync после «пропажи» реальной системы → modeSource=auto→fallback
+POST {{dp}}/admin/sync/1c
+X-Api-Key: {{key}}
+
+### ---------------------------------------------------------------------------
+### ШАГ 5. Явный stub — всегда наш сервис-заместитель
+POST {{dp}}/admin/adapters/1c/mode
+X-Api-Key: {{key}}
+Content-Type: application/json
+
+{ "mode": "stub" }
+
+### 10. Sync из имитатора — цена вернулась к базовой (rev=0)
+POST {{dp}}/admin/sync/1c
+X-Api-Key: {{key}}
+
+### ---------------------------------------------------------------------------
+### ШАГ 6. Битрикс24: тот же сценарий (auto → fallback/real)
+POST {{dp}}/admin/sync/bitrix
+X-Api-Key: {{key}}
+
+### 11. Сделка в crm.deals с ext.bitrix
+POST {{dp}}/dp/v1/stores/crm.deals/entities/Deal/query
+X-Api-Key: {{key}}
+Content-Type: application/json
+
+{
+  "from": "Deal",
+  "select": ["id", "title", "stage", "amount", "ext"],
+  "where": { "eq": { "field": "externalId", "value": "1001" } }
+}
+
+### ---------------------------------------------------------------------------
+### ШАГ 7. События dp.data.changed.v1 (outbox — то, что уйдёт в RabbitMQ)
+GET {{dp}}/admin/outbox?limit=10
+X-Api-Key: {{key}}
+
+### ШАГ 8. Журнал миграций (forward-only, dp.migration_journal; применяет dp-api)
+GET {{dp}}/admin/migrations
+X-Api-Key: {{key}}
+
+### ---------------------------------------------------------------------------
+### БОНУС: Extension DTO — расширение WMS поверх номенклатуры
+POST {{dp}}/dp/v1/stores/mdm.nomenclature/entities/Nomenclature
+X-Api-Key: {{key}}
+Content-Type: application/json
+
+{
+  "code": "РУЧ-001",
+  "name": "Ручная позиция с расширением WMS",
+  "price": 100,
+  "ext": {
+    "wms": { "palletCount": 4, "storageZone": "B-2" },
+    "onec": { "note1c": "created manually" }
+  }
+}
+
+### PATCH: свой namespace обновляем, чужой не трогаем; null удаляет ключ
+PATCH {{dp}}/dp/v1/stores/mdm.nomenclature/entities/Nomenclature/{{insertReturnedId}}
+X-Api-Key: {{key}}
+Content-Type: application/json
+
+{ "ext": { "wms": { "storageZone": null } } }

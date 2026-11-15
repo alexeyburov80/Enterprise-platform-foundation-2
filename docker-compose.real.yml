@@ -1,0 +1,56 @@
+# ============================================================================
+# Опциональный оверлей: «реальные» системы для демонстрации auto → real.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.real.yml up -d
+#
+# В MVP «реальные» 1С/Битрикс эмулируются теми же образами имитаторов под
+# другими именами (real-1c / real-bitrix) — код коннектора один и тот же,
+# меняется только RealBaseUrl, это и есть точка Strangler Fig. При промышленном
+# внедрении просто укажите в RealBaseUrl адреса настоящих контуров.
+#
+# Сценарий «система пропала» (fallback обратно на имитатор):
+#   docker stop dp-real-1c && curl -X POST http://localhost:8080/admin/sync/1c \
+#        -H "X-Api-Key: dev-key"   # → modeSource: auto→fallback
+#
+# Явные режимы (без auto):
+#   POST /admin/adapters/1c/mode {"mode":"real"}  — только реальный контур,
+#                                                   недоступность = DP-4001
+#   POST /admin/adapters/1c/mode {"mode":"stub"}  — всегда наш имитатор
+# ============================================================================
+
+services:
+  real-1c:
+    build:
+      context: ./src/Dp.Imitator1C
+      dockerfile: Dockerfile
+    container_name: dp-real-1c
+    ports:
+      - "8083:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Data__DelayMs: "60"
+      Data__FailRate: "0"
+      Data__Revision: "1"      # ревизия «прод-данных» чуть отличается от имитатора
+      Integration__User: svc_dp
+      Integration__Password: dp-secret
+
+  real-bitrix:
+    build:
+      context: ./src/Dp.ImitatorBitrix
+      dockerfile: Dockerfile
+    container_name: dp-real-bitrix
+    ports:
+      - "8084:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Data__DelayMs: "60"
+      Data__FailRate: "0"
+      Data__Revision: "1"
+      Auth__Key: webhook-dev-key
+
+  dp-sync:
+    depends_on:
+      real-1c:
+        condition: service_started
+      real-bitrix:
+        condition: service_started

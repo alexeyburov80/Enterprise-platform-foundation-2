@@ -1,0 +1,6 @@
+**/bin/
+**/obj/
+**/.git
+**/*.md
+deploy/demo/
+*.zip

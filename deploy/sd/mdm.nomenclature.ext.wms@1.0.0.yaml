@@ -1,0 +1,28 @@
+# ============================================================================
+# ExtensionSchema — демонстрация Extension DTO (решение A-5):
+# расширение сущности Nomenclature модулем WMS через jsonb-колонку ext,
+# namespace wms. Независимый semver; tolerant reader сохраняет чужие ключи.
+# ============================================================================
+
+apiVersion: sd.platform/v1
+kind: ExtensionSchema
+
+metadata:
+  module: mdm
+  store: nomenclature
+  namespace: wms
+  version: 1.0.0
+  displayName: "Расширение WMS для номенклатуры"
+
+spec:
+  appliesTo:
+    store: mdm.nomenclature
+    entity: Nomenclature
+  fields:
+    - name: palletCount
+      type: int32
+      required: false
+    - name: storageZone
+      type: string
+      length: 16
+      required: false
