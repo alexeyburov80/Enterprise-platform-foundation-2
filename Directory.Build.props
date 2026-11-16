@@ -1,0 +1,11 @@
+<Project>
+  <!-- Dp.Platform MVP: единые свойства всех проектов (DRY).
+       Правило код-стайла: один файл = одна ответственность, <= 120 строк. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12</LangVersion>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="..\Dp.Platform.Framework\Dp.Platform.Framework.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Универсальное ядро платформы: Result/RFC 9457, события RabbitMQ,
+       content-addressed хранилище, health-checks, переключатель real<->stub.
+       Внешние зависимости только Npgsql и RabbitMQ.Client (vendored в /lib). -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Dp.Platform.Contracts\Dp.Platform.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Npgsql">
+      <HintPath>..\..\lib\Npgsql.dll</HintPath>
+    </Reference>
+    <Reference Include="RabbitMQ.Client">
+      <HintPath>..\..\lib\RabbitMQ.Client.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -1,187 +1,243 @@
-# ============================================================================
-# Локальный стенд Data Platform MVP — каждый компонент в СВОЁМ контейнере
-# (полностью офлайн после первичной загрузки образов).
-#
-# Контур (6 сервисов):
-#   dp-api          :8080  — Data Access API (/dp/v1, 9 операций) + admin
-#   dp-sync         :8090  — интеграционный воркер: адаптеры 1С/Битрикс,
-#                            режимы auto|real|stub, outbox → RabbitMQ
-#   imitator-1c     :8081  — НАШ сервис-заместитель 1С (OData)
-#   imitator-bitrix :8082  — НАШ сервис-заместитель Битрикс24 (webhook REST)
-#   postgres        :5432  — хранилище logical store'ов + dp.outbox
-#   rabbitmq        :5672/15672 — события dp.data.changed.v1
-#
-# Первичный запуск: docker compose up -d --build (единократно нужна сеть:
-# образы + NuGet). Далее весь контур работает без доступа в интернет.
-#
-# Режим интеграции по умолчанию — auto: если реальная 1С/Битрикс недоступна
-# (RealBaseUrl не отвечает), dp-sync transparentно замещает её собственными
-# сервисами imitator-1c / imitator-bitrix (fallback фиксируется в
-# GET /admin/adapters). Подключить «реальные» системы:
-#   docker compose -f docker-compose.yml -f docker-compose.real.yml up -d
-# ============================================================================
+# =============================================================================
+# Dp.Platform MVP — мульти-контейнерное развертывание (ревью #2: «всё в одном
+# докере — плохо»). Каждый сервис и каждый имитатор — отдельный контейнер.
+# Замещение 1С/Битрикс: адаптеры в режиме auto сами уходят на свои имитаторы.
+# =============================================================================
 
-name: dp-mvp
+name: dp-platform
 
 services:
+  # ---------------------------------------------------------------- инфраструктура
   postgres:
     image: postgres:16-alpine
-    container_name: dp-postgres
     environment:
       POSTGRES_USER: dp
-      POSTGRES_PASSWORD: dp-dev-secret
+      POSTGRES_PASSWORD: dp
       POSTGRES_DB: dp
     ports:
-      - "5432:5432"
+      - "5433:5432" # host 5433, чтобы не конфликтовать с локальным postgres
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - dp-postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dp -d dp"]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 30
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
-    container_name: dp-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: dp
+      RABBITMQ_DEFAULT_PASS: dp
     ports:
-      - "5672:5672"    # AMQP
-      - "15672:15672"  # UI (guest / guest)
+      - "5672:5672"
+      - "15672:15672" # management UI (dp/dp)
     volumes:
-      - rabbitdata:/var/lib/rabbitmq
+      - dp-rabbitmq:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 30
 
-  # ---------------------------------------------------------------------------
-  # dp-api — публичный API. Про интеграционные системы НЕ знает вообще:
-  # адаптеры и синхронизация живут в dp-sync (управление — через прокси).
-  # ---------------------------------------------------------------------------
-  dp-api:
+  # ---------------------------------------------------------------- миграции
+  # Однократный прогон: forward-only миграции + журнал dp_meta.migration_journal.
+  migrator:
     build:
       context: .
-      dockerfile: src/Dp.Api/Dockerfile
-    container_name: dp-api
-    ports:
-      - "8080:8080"    # API + Swagger UI (/swagger)
+      args:
+        PROJECT_PATH: Dp.Platform.Migrator
+    command: ["dotnet", "Dp.Platform.Migrator.dll", "/app/migrations"]
     environment:
-      ASPNETCORE_ENVIRONMENT: Development
-      ConnectionStrings__Db: "Host=postgres;Port=5432;Database=dp;Username=dp;Password=dp-dev-secret"
-      Sd__Path: /app/sd
-      Migrations__AutoApply: "true"       # dp-api применяет миграции (журнал dp.migration_journal)
-      Auth__ApiKey: dev-key
-      Worker__BaseUrl: http://dp-sync:8080
-      Worker__ApiKey: dev-key
+      DP_MIGRATOR__CONNECTION: Host=postgres;Port=5432;Database=dp;Username=dp;Password=dp
     volumes:
-      - ./deploy/sd:/app/sd:ro
+      - ./db/migrations:/app/migrations:ro
     depends_on:
       postgres:
         condition: service_healthy
-      dp-sync:
-        condition: service_started
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/8080'"]
+    restart: "no"
+
+  # ---------------------------------------------------------------- платформа
+  # Реестр схем: SD DSL v1, версии, матрица совместимости.
+  registry:
+    build:
+      context: .
+      args:
+        PROJECT_PATH: Dp.Platform.Registry
+        APP_DLL: Dp.Platform.Registry.dll
+    environment:
+      ConnectionStrings__Registry: Host=postgres;Port=5432;Database=dp;Username=dp;Password=dp
+    ports:
+      - "8081:8080"
+    healthcheck: &http-health
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
       interval: 10s
       timeout: 3s
-      retries: 10
+      retries: 12
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
 
-  # ---------------------------------------------------------------------------
-  # dp-sync — интеграционный воркер: коннекторы 1С/Битрикс, auto/real/stub,
-  # fallback на имитаторы, outbox publisher → RabbitMQ. Схему БД не мигрирует —
-  # ждёт dp-api. Порт 8090 наружу только для наблюдаемости (GET /health,
-  # GET /adapters); в проде держать в изолированной сети.
-  # ---------------------------------------------------------------------------
-  dp-sync:
+  # Data Access API: 9 операций + Query DSL + Extension DTO.
+  data:
     build:
       context: .
-      dockerfile: src/Dp.Sync/Dockerfile
-    container_name: dp-sync
-    ports:
-      - "8090:8080"    # внутреннее API воркера (health/adapters/run) — для отладки
+      args:
+        PROJECT_PATH: Dp.Platform.Data
+        APP_DLL: Dp.Platform.Data.dll
     environment:
-      ASPNETCORE_ENVIRONMENT: Development
-      ConnectionStrings__Db: "Host=postgres;Port=5432;Database=dp;Username=dp;Password=dp-dev-secret"
-      Sd__Path: /app/sd
-      Auth__ApiKey: dev-key
-      Rabbit__Host: rabbitmq
-      Rabbit__Port: "5672"
-      Rabbit__User: guest
-      Rabbit__Pass: guest
-      Rabbit__Exchange: dp.data
-      Sync__AutoIntervalSeconds: "0"      # >0 — автосинк по расписанию, 0 — вручную
-      # --- интеграционные системы: режим auto = real при доступности,
-      #     иначе наш сервис-заместитель (imitator-*) ---------------------------
-      Integration__Systems__1c__Mode: auto
-      Integration__Systems__1c__RealBaseUrl: http://real-1c:8080
-      Integration__Systems__1c__StubBaseUrl: http://imitator-1c:8080
-      Integration__Systems__1c__User: svc_dp
-      Integration__Systems__1c__Password: dp-secret
-      Integration__Systems__bitrix__Mode: auto
-      Integration__Systems__bitrix__RealBaseUrl: http://real-bitrix:8080
-      Integration__Systems__bitrix__StubBaseUrl: http://imitator-bitrix:8080
-      Integration__Systems__bitrix__WebhookKey: webhook-dev-key
-    volumes:
-      - ./deploy/sd:/app/sd:ro
+      ConnectionStrings__Data: Host=postgres;Port=5432;Database=dp;Username=dp;Password=dp
+      Registry__BaseUrl: http://registry:8080
+    ports:
+      - "8082:8080"
+    healthcheck: *http-health
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+
+  # Content-addressed файловое хранилище (SHA-256, blobs/ab/cd/).
+  files:
+    build:
+      context: .
+      args:
+        PROJECT_PATH: Dp.Platform.Files
+        APP_DLL: Dp.Platform.Files.dll
+    environment:
+      ConnectionStrings__Files: Host=postgres;Port=5432;Database=dp;Username=dp;Password=dp
+      Files__DataRoot: /data/blobs
+    ports:
+      - "8083:8080"
+    volumes:
+      - dp-files:/data/blobs
+    healthcheck: *http-health
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  # CDC: транзакционный outbox -> RabbitMQ (dp.data.changed.v1).
+  cdc:
+    build:
+      context: .
+      args:
+        PROJECT_PATH: Dp.Platform.Cdc
+        APP_DLL: Dp.Platform.Cdc.dll
+    environment:
+      ConnectionStrings__Cdc: Host=postgres;Port=5432;Database=dp;Username=dp;Password=dp
+      Rabbit__ConnectionString: amqp://dp:dp@rabbitmq:5672/%2F
+      Cdc__RegistryBaseUrl: http://registry:8080
+    ports:
+      - "8084:8080"
+    healthcheck: *http-health
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
-      imitator-1c:
-        condition: service_started
-      imitator-bitrix:
-        condition: service_started
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/8080'"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
 
-  # ---------------------------------------------------------------------------
-  # НАШИ сервисы-заместители внешних систем (каждый в своём контейнере).
-  # Именно они используются, когда реальной 1С/Битрикс нет, и в режиме stub.
-  # ---------------------------------------------------------------------------
-  imitator-1c:
+  # ---------------------------------------------------------------- адаптеры
+  # Универсальный шаблон: 1 контейнер = 1 интеграционная система.
+  # Mode=auto: если реальная 1С недоступна (по умолчанию её и нет) —
+  # трафик автоматически уходит на наш имитатор stub-1c. Замещение без правки кода.
+  adapter-1c:
     build:
-      context: ./src/Dp.Imitator1C
-      dockerfile: Dockerfile
-    container_name: dp-imitator-1c
+      context: .
+      args:
+        PROJECT_PATH: Dp.Platform.Adapter.OneC
+        APP_DLL: Dp.Platform.Adapter.OneC.dll
+    environment:
+      Upstream__Mode: ${ADAPTER_1C_MODE:-auto} # auto | real | stub
+      Upstream__PrimaryUrl: ${ADAPTER_1C_PRIMARY_URL:-http://1c-real:8080}
+      Upstream__FallbackUrl: http://stub-1c:8080
+      Upstream__ProbePath: /health
     ports:
-      - "8081:8080"    # OData-подобный REST 1С + GET /health
+      - "8085:8080"
+    healthcheck: *http-health
+    depends_on:
+      stub-1c:
+        condition: service_started
+
+  adapter-bitrix:
+    build:
+      context: .
+      args:
+        PROJECT_PATH: Dp.Platform.Adapter.Bitrix
+        APP_DLL: Dp.Platform.Adapter.Bitrix.dll
+    environment:
+      Upstream__Mode: ${ADAPTER_BITRIX_MODE:-auto}
+      Upstream__PrimaryUrl: ${ADAPTER_BITRIX_PRIMARY_URL:-http://bitrix-real:8080}
+      Upstream__FallbackUrl: http://stub-bitrix:8080
+      Upstream__ProbePath: /health
+    ports:
+      - "8086:8080"
+    healthcheck: *http-health
+    depends_on:
+      stub-bitrix:
+        condition: service_started
+
+  # ---------------------------------------------------------------- имитаторы
+  # Каждый имитатор — строго свой контейнер (требование ревью).
+  stub-1c:
+    build:
+      context: .
+      args:
+        PROJECT_PATH: Dp.Platform.Stub.OneC
+        APP_DLL: Dp.Platform.Stub.OneC.dll
     environment:
       ASPNETCORE_ENVIRONMENT: Development
-      Data__DelayMs: "120"
-      Data__FailRate: "0"
-      Data__Revision: "0"
-      Integration__User: svc_dp
-      Integration__Password: dp-secret
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/8080'"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-
-  imitator-bitrix:
-    build:
-      context: ./src/Dp.ImitatorBitrix
-      dockerfile: Dockerfile
-    container_name: dp-imitator-bitrix
     ports:
-      - "8082:8080"    # Bitrix24 webhook REST + GET /health
+      - "8091:8080" # открыт наружу: можно «играть» с OData напрямую
+    healthcheck: *http-health
+
+  stub-bitrix:
+    build:
+      context: .
+      args:
+        PROJECT_PATH: Dp.Platform.Stub.Bitrix
+        APP_DLL: Dp.Platform.Stub.Bitrix.dll
     environment:
       ASPNETCORE_ENVIRONMENT: Development
-      Data__DelayMs: "120"
-      Data__FailRate: "0"
-      Data__Revision: "0"
-      Auth__Key: webhook-dev-key
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/8080'"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
+      StubBitrix__WebhookKey: ${STUB_BITRIX_KEY:-demo}
+    ports:
+      - "8092:8080"
+    healthcheck: *http-health
+
+  # ---------------------------------------------------------------- шлюз
+  # Единая точка входа: маршрутизация по префиксам + агрегированный health.
+  gateway:
+    build:
+      context: .
+      args:
+        PROJECT_PATH: Dp.Platform.Gateway
+        APP_DLL: Dp.Platform.Gateway.dll
+    environment:
+      Gateway__ApiToken: ${DP_API_TOKEN:-dp-dev-token}
+      Gateway__Routes__/api/v1/schema: http://registry:8080
+      Gateway__Routes__/api/v1/stores: http://registry:8080
+      Gateway__Routes__/api/v1/data: http://data:8080
+      Gateway__Routes__/api/v1/files: http://files:8080
+      Gateway__Routes__/api/v1/int/1c: http://adapter-1c:8080
+      Gateway__Routes__/api/v1/int/bitrix: http://adapter-bitrix:8080
+      Gateway__Services__gateway: http://gateway:8080
+      Gateway__Services__registry: http://registry:8080
+      Gateway__Services__data: http://data:8080
+      Gateway__Services__files: http://files:8080
+      Gateway__Services__cdc: http://cdc:8080
+      Gateway__Services__adapter-1c: http://adapter-1c:8080
+      Gateway__Services__adapter-bitrix: http://adapter-bitrix:8080
+      Gateway__Services__stub-1c: http://stub-1c:8080
+      Gateway__Services__stub-bitrix: http://stub-bitrix:8080
+    ports:
+      - "8080:8080" # ЕДИНАЯ точка входа платформы
+    healthcheck: *http-health
+    depends_on:
+      - registry
+      - data
+      - files
+      - cdc
+      - adapter-1c
+      - adapter-bitrix
 
 volumes:
-  pgdata:
-  rabbitdata:
+  dp-postgres:
+  dp-rabbitmq:
+  dp-files:

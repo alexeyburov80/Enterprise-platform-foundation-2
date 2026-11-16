@@ -1,6 +1,12 @@
-**/bin/
-**/obj/
-**/.git
-**/*.md
-deploy/demo/
+# Контекст сборки: только исходники и vendored-библиотеки.
+bin/
+obj/
+docs/
+scripts/
+db/
+docker-compose.yml
+.env
+.git/
 *.zip
+*.md
+!README.md
